@@ -1,4 +1,4 @@
-# FDR: Foundation-model-based Therapy Recommendation for Neoadjuvant Breast Cancer Treatment
+# FDR: Foundation-model-based Therapy Recommendation for Neoadjuvant Breast Cancer
 
 This repository contains the code used to train and evaluate **FDR**, a TabPFN-based
 recommendation method for selecting a personalised neoadjuvant therapy plan for
