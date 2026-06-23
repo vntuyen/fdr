@@ -10,9 +10,8 @@ classical regression, causal meta-learners, causal forests, and more recent appr
 | File | Description |
 |---|---|
 | `config.py` | Single source of truth: environment/CUDA/TabPFN-checkpoint setup, the 6-dataset registry (`DATASET_REGISTRY`), the 10-method registry (`METHOD_META`), and the repeated-run seed list (`REPEAT_SEEDS`). |
-| `fdr.py` | The proposed method: one TabPFN regressor fit per treatment plan, on patients who actually received that plan. Two scenario-specific entry points, `recommend_fdr_cv` and `recommend_fdr_ood`, sharing the same underlying mechanism. |
+| `fdr.py` | The proposed method, two scenario-specific entry points, `recommend_fdr_cv` and `recommend_fdr_ood`, sharing the same underlying mechanism. |
 | `baselines.py` | All nine baseline methods: CatBoost, XGBoost (classical); S-/X-/DR-/R-Learner (meta-learners); Causal Forest (causal); CUTS, BITES (modern). |
-| `policy_value.py` | Propensity-based / doubly-robust (DR) off-policy value estimation, correcting the naive "Following vs. Not Following" comparison for confounded treatment assignment. |
 | `statistical_validation.py` | Bootstrap confidence intervals, covariate-balance (SMD) diagnostics, and cross-dataset stability metrics. |
 | `evaluation.py` | The full evaluation pipeline: CAU / Recovery Ratio / RRD / average-RCB metrics per dataset, the paired Clinical-vs-Multi-omics comparison, the within-cohort FDR-vs-all-method figure, cross-dataset summaries with 95% bootstrap CIs, and every plot used in the paper. |
 | `run_experiments.py` | Top-level CLI entry point: runs FDR + all baselines across every dataset in its configured scenario (CV or OOD), then calls the full evaluation suite. |
