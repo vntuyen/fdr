@@ -1,0 +1,25 @@
+Cohort,Modality,Group,Metric,mean,std,N_Methods
+TransNEO,Clinical,FDR,CAU_pp,2.2263,1.8539,
+TransNEO,Clinical,FDR,RRD_pp,5.4606,4.6463,
+TransNEO,Clinical,FDR,Recovery_Ratio,1.2465,0.218,
+TransNEO,Clinical,All-method mean,CAU_pp,0.1103,3.1487,10.0
+TransNEO,Clinical,All-method mean,RRD_pp,-0.3933,9.45,10.0
+TransNEO,Clinical,All-method mean,Recovery_Ratio,1.0435,0.3476,10.0
+TransNEO,Multi-omics,FDR,CAU_pp,8.4501,0.9735,
+TransNEO,Multi-omics,FDR,RRD_pp,48.3943,5.5177,
+TransNEO,Multi-omics,FDR,Recovery_Ratio,3.7981,0.4203,
+TransNEO,Multi-omics,All-method mean,CAU_pp,4.3987,3.9213,10.0
+TransNEO,Multi-omics,All-method mean,RRD_pp,15.9436,15.7653,10.0
+TransNEO,Multi-omics,All-method mean,Recovery_Ratio,1.9208,0.9694,10.0
+ARTemis,Clinical,FDR,CAU_pp,2.6906,2.1524,
+ARTemis,Clinical,FDR,RRD_pp,10.0472,7.1677,
+ARTemis,Clinical,FDR,Recovery_Ratio,1.4684,0.355,
+ARTemis,Clinical,All-method mean,CAU_pp,-0.497,2.8489,10.0
+ARTemis,Clinical,All-method mean,RRD_pp,-3.3722,12.7472,10.0
+ARTemis,Clinical,All-method mean,Recovery_Ratio,0.9748,0.5178,10.0
+ARTemis,Multi-omics,FDR,CAU_pp,9.907,4.1177,
+ARTemis,Multi-omics,FDR,RRD_pp,33.0185,10.2217,
+ARTemis,Multi-omics,FDR,Recovery_Ratio,3.2858,1.2765,
+ARTemis,Multi-omics,All-method mean,CAU_pp,3.3985,5.7424,10.0
+ARTemis,Multi-omics,All-method mean,RRD_pp,16.1102,20.1793,10.0
+ARTemis,Multi-omics,All-method mean,Recovery_Ratio,1.9598,0.9894,10.0
