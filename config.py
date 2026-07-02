@@ -37,7 +37,7 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 SEED = 42
 
-TABPFN_CKPT_PATH = "/scratch/sq95/tv9849/FDR/tabpfn/tabpfn-v3-regressor-v3_default.ckpt"
+TABPFN_CKPT_PATH = "/scratch/.../FDR/tabpfn/tabpfn-v3-regressor-v3_default.ckpt"
 
 # Ten seeds shared by the repeated-CV driver and the FDR OOD-ensemble so
 # both pipelines' notion of "a repeat / ensemble member" stays consistent.
