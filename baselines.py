@@ -8,13 +8,11 @@ differs (handled in run_experiments.py), not the method logic.
 
 Groups (see config.METHOD_META for labels used in tables/plots):
   A. Classical regressors wrapped with TP-toggling counterfactual prediction
-     (CatBoost, Neural Net, Random Forest, SVR, XGBoost, Linear Regression)
+     (CatBoost,  XGBoost)
   B. Meta-learners (S-, X-, DR-, R-Learner)
   C. Causal Forest (DML)
-  D. Modern SOTA (CUTS, EP-Learner, BITES)
+  D. Modern SOTA (CUTS, BITES)
 
-NOTE: TARNet and DragonNet have been intentionally removed from this baseline
-set per current experimental scope.
 """
 
 import numpy as np
@@ -30,8 +28,7 @@ import config
 
 
 # ============================================================
-# Shared counterfactual-recommendation helper
-# ============================================================
+
 
 def recommend_treatment(model, X_test: pd.DataFrame, treatment_plans: list) -> pd.DataFrame:
     """
