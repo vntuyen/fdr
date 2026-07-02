@@ -61,8 +61,8 @@ pip install -r requirements.txt
 
 
 
-> **Before running:**  The checkpoint path is currently an absolute HPC scratch path (`TABPFN_CKPT_PATH = "/scratch/..."`).
-> Update that constant near the top of both files to match the `/tabpfn` folder
+> **Before running:**  The checkpoint path is currently an absolute HPC scratch path (`TABPFN_CKPT_PATH = "/scratch/.../FDR/tabpfn/tabpfn-v3-regressor-v3_default.ckpt"`).
+> Update that constant near the top of config.py file to match the `/tabpfn` folder
 > convention above, e.g.
 > `TABPFN_CKPT_PATH = os.path.join(os.path.dirname(__file__), "tabpfn", "tabpfn-v3-regressor-v3_default.ckpt")`,
 > before running either script.
