@@ -86,9 +86,8 @@ input/
 Running the pipeline produces, under `<base_path>/output/`:
 
 - `output/<dataset_name>/` -- per-method prediction files (`<dataset>_<method>_REC.csv` /
-  `_REC_all_runs.csv`), per-dataset metric summaries (`Recovery_Metrics_summary.csv`,
-  `PolicyValue_summary.csv`, `RCB_Score_Comparison.csv`, `CovariateBalance_SMD_summary.csv`),
-  and plots (Recovery Ratio, RCB comparison, DR policy uplift).
+  `_REC_all_runs.csv`), per-dataset metric summaries (`Recovery_Metrics_summary.csv`, `RCB_Score_Comparison.csv`),
+  and plots (Recovery Ratio, RCB comparison).
 - `output/output_AllDatasets_Metrics.csv` -- combined CAU/RRD/RR per (dataset, method) with
   mean, across-run std, and 95% bootstrap CI.
 - `output/output_AllMethods_CrossDataset_Mean_CI95.csv` -- mean + 95% CI across all six
