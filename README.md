@@ -66,7 +66,7 @@ FDR/
 ### Requirements
 
 - Python 3.10
-- CUDA 12.1+ (a GPU is strongly recommended; the CPU fallback works but is slow)
+- CUDA 12.1+ (a GPU is recommended; the CPU fallback works)
 - R ≥ 4.3 (only needed for the CTR baseline)
 
 ### Setup
@@ -79,7 +79,7 @@ cd FDR
 # 2. Create and activate a virtual environment
 python3.10 -m venv fdr_env
 source fdr_env/bin/activate          # Linux / macOS
-# fdr_env\Scripts\activate           # Windows
+# source fdr_env\Scripts\activate           # Windows
 
 # 3. Install dependencies
 pip install --upgrade pip
@@ -165,7 +165,6 @@ python run_experiments.py --n-repeats 5 --k 5
 ```
 
 The paper reports five repeated runs of 5-fold cross-validation.
-<!-- TODO: check the --n-repeats default in run_experiments.py matches the paper. -->
 
 ## Outputs
 
