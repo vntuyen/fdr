@@ -1,0 +1,12 @@
+Method,N_Datasets,N_Significant_Unadjusted,N_Significant_BH,BH_Significant_Datasets
+FDR,6,6,5,ARTemis clinical; Combined TransNEO + ARTemis multi-omics CV; TransNEO multi-omics; ARTemis multi-omics; TransNEO and ARTemis multi-omics OOD
+CB,6,4,3,Combined TransNEO + ARTemis multi-omics CV; TransNEO multi-omics; TransNEO and ARTemis multi-omics OOD
+CF,6,3,3,Combined TransNEO + ARTemis multi-omics CV; TransNEO multi-omics; ARTemis multi-omics
+S_L,6,3,3,Combined TransNEO + ARTemis multi-omics CV; ARTemis multi-omics; TransNEO and ARTemis multi-omics OOD
+CUTS,6,3,2,Combined TransNEO + ARTemis multi-omics CV; ARTemis multi-omics
+XGB,6,3,2,Combined TransNEO + ARTemis multi-omics CV; ARTemis multi-omics
+CTR,6,2,2,Combined TransNEO + ARTemis multi-omics CV; TransNEO and ARTemis multi-omics OOD
+BITES,6,3,1,TransNEO and ARTemis multi-omics OOD
+R_L,6,2,0,
+DR_L,6,1,0,
+X_L,6,1,0,
