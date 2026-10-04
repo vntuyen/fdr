@@ -208,8 +208,3 @@ The `output/` folder is created automatically.
 | BITES | `BITES` | Recent treatment recommendation |
 
 
-
-## Acknowledgements
-
-This work uses data  by Prior Labs.
-
