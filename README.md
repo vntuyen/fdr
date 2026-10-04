@@ -40,15 +40,15 @@ Primary metric: **Coverage-Adjusted Uplift (CAU)**, the gain in pathological com
 ```
 FDR/
 ├── config.py                  # Paths, dataset registry, method registry, run seeds
-├── fdr.py                     # The proposed method (CV and OOD entry points)
+├── fdr.py                     # The proposed method 
 ├── baselines.py               # The ten baseline methods
 ├── ctr_causaltree.R           # R back-end for the CTR baseline
 ├── statistical_validation.py  # Bootstrap CIs, permutation tests, BH correction, IPW, E-values
 ├── evaluation.py              # Metrics, tables and figures used in the paper
 ├── run_experiments.py         # Main entry point: runs all methods, then evaluates
-├── requirements.txt
+├── requirements.txt           # Environment installation
 ├── tabpfn/                    # Place the TabPFN checkpoint here (not tracked)
-└── input/                     # Datasets (not tracked; see "Data")
+└── input/                     # Datasets 
 ```
 
 | File | Description |
