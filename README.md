@@ -1,55 +1,90 @@
-# FDR: Foundation-model-based Therapy Recommendation for Neoadjuvant Breast Cancer
+# FDR: Foundation-Model-Based Therapy Recommendation for Neoadjuvant Breast Cancer
 
-This repository contains the code used to train and evaluate **FDR**, a TabPFN-based
-recommendation method for selecting a personalised neoadjuvant therapy plan for
-breast cancer patients, together with 9 baseline recommendation methods spanning
-classical regression, causal meta-learners, causal forests, and recent approaches.
+[![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/release/python-3100/)
+[![License](https://img.shields.io/badge/license-TBD-lightgrey.svg)](#license)
 
-## Repository contents
+
+---
+
+## Overview
+
+Selecting the most appropriate neoadjuvant therapy plan for a breast cancer patient is difficult because treatment response varies widely between patients, and the available cohorts are small and high-dimensional.
+
+**FDR** learns one TabPFN foundation-model regressor for each candidate therapy plan. It predicts the continuous Residual Cancer Burden (RCB) score each patient would have under every plan, and recommends the plan with the lowest predicted score.
+
+<p align="center">
+  <!-- TODO: add the method overview figure, e.g. docs/fdr_overview.png -->
+  <!-- <img src="docs/fdr_overview.png" width="720" alt="FDR overview"> -->
+</p>
+
+FDR is compared with ten baselines on six clinical and multi-omics settings built from two independent breast cancer cohorts (TransNEO and ARTemis). The evaluation covers both repeated within-cohort cross-validation and cross-cohort evaluation without retraining.
+
+## Key results
+
+Primary metric: **Coverage-Adjusted Uplift (CAU)**, the gain in pathological complete response (pCR) rate among patients whose received therapy matched the recommendation, scaled by recommendation coverage. Values are in percentage points (pp), as mean ± std over five repeated runs.
+
+| Setting | FDR | Best baseline |
+|---|---|---|
+| TransNEO clinical | 4.45 ± 2.08 | **5.13 ± 2.53** (X-Learner) |
+| ARTemis clinical | **7.58 ± 3.13** | 4.12 ± 4.87 (X-Learner) |
+| TransNEO multi-omics | **14.73 ± 3.24** | 13.34 ± 2.29 (Causal Forest) |
+| ARTemis multi-omics | **14.09 ± 1.68** | 12.14 ± 2.08 (Causal Forest) |
+| TransNEO + ARTemis multi-omics (CV) | **12.06 ± 1.62** | 11.79 ± 1.02 (Causal Forest) |
+| TransNEO → ARTemis multi-omics (OOD) | **11.00 ± 0.00** | 8.89 ± 0.00 (XGBoost) |
+
+- **Ranking.** FDR ranks first in 5 of 6 settings and second in the remaining one.
+- **Cross-setting average.** FDR has the highest mean of all 11 methods on every metric:
+  - CAU: 10.65 pp, 95% CI 7.72–13.52.
+  - Recovery Rate Difference (RRD): 24.31 pp, 95% CI 17.70–29.80.
+  - Recovery Ratio: 2.87, 95% CI 2.12–3.56.
+- **Multi-omics.** Adding multi-omics features increases FDR's CAU in both cohorts:
+  - TransNEO: 4.45 → 14.73 pp.
+  - ARTemis: 7.58 → 14.09 pp.
+- **Significance.** FDR's CAU exceeds chance in all 6 settings (one-sided permutation test, p < 0.05). It remains significant in 5 of 6 after Benjamini–Hochberg correction; the exception is TransNEO clinical.
+
+
+## Repository structure
+
+```
+FDR/
+├── config.py                  # Paths, dataset registry, method registry, run seeds
+├── fdr.py                     # The proposed method (CV and OOD entry points)
+├── baselines.py               # The ten baseline methods
+├── ctr_causaltree.R           # R back-end for the CTR baseline
+├── statistical_validation.py  # Bootstrap CIs, permutation tests, BH correction, IPW, E-values
+├── evaluation.py              # Metrics, tables and figures used in the paper
+├── run_experiments.py         # Main entry point: runs all methods, then evaluates
+├── requirements.txt
+├── tabpfn/                    # Place the TabPFN checkpoint here (not tracked)
+└── input/                     # Datasets (not tracked; see "Data")
+```
 
 | File | Description |
 |---|---|
-| `config.py` | Single source of truth: environment/CUDA/TabPFN-checkpoint setup, the 6-dataset registry (`DATASET_REGISTRY`), the 10-method registry (`METHOD_META`), and the repeated-run seed list (`REPEAT_SEEDS`). |
-| `fdr.py` | The proposed method, two scenario-specific entry points, `recommend_fdr_cv` and `recommend_fdr_ood`, sharing the same underlying mechanism. |
-| `baselines.py` | All nine baseline methods: CatBoost, XGBoost (classical); S-/X-/DR-/R-Learner (meta-learners); Causal Forest (causal); CUTS, BITES (modern). |
-| `statistical_validation.py` | Bootstrap confidence intervals and cross-dataset stability metrics. |
-| `evaluation.py` | The full evaluation pipeline: CAU / Recovery Ratio / RRD / average-RCB metrics per dataset, the paired Clinical-vs-Multi-omics comparison, the within-cohort FDR-vs-all-method figure, cross-dataset summaries with 95% bootstrap CIs, and every plot used in the paper. |
-| `run_experiments.py` | Runs FDR + all baselines across every dataset in its configured scenario (CV or OOD), then calls the full evaluation suite. |
+| `config.py` | Single source of truth: environment, CUDA and TabPFN-checkpoint setup; the six-dataset registry (`DATASET_REGISTRY`); the method registry (`METHOD_META`); and the repeated-run seeds (`REPEAT_SEEDS`). |
+| `fdr.py` | The proposed method. It has two scenario-specific entry points, `recommend_fdr_cv` and `recommend_fdr_ood`, which share the same mechanism. |
+| `baselines.py` | The ten baselines (see [Methods](#methods-compared)). |
+| `ctr_causaltree.R` | R back-end for CTR (honest causal trees via `causalTree`), adapted from [vntuyen/ctr](https://github.com/vntuyen/ctr). It is called by `baselines.recommend_ctr`. |
+| `statistical_validation.py` | Patient-level bootstrap CIs, permutation tests, Bonferroni/BH correction, covariate balance (SMD), IPW-adjusted CAU, IPW/doubly-robust policy value, and E-values. |
+| `evaluation.py` | Computes CAU, RRD, Recovery Ratio and average RCB per dataset. Builds the clinical-vs-multi-omics comparison, cross-dataset summaries, the FDR significance table, and all paper figures. |
+| `run_experiments.py` | Runs FDR and all baselines on every dataset in its configured scenario (CV or OOD), then runs the evaluation. |
 
-## Datasets
-
-Six datasets are used, all drawn from the **TransNEO** (Sammut et al., *Nature*, 2022)
-and **ARTemis/PBCP** (Earl et al., *Lancet Oncology*, 2015) neoadjuvant breast cancer
-cohorts, sharing a common outcome (continuous `RCB.score`) and a common four-arm
-treatment-plan structure (`TP1`-`TP4`: taxane backbone with binary anthracycline/anti-HER2
-add-ons).
-
-| Dataset key | Cohort(s) | Feature view | Scenario | N (true cohort) |
-|---|---|---|---|---|
-| `clin_TransNEO` | TransNEO | Clinical only (8 features) | CV | 147 |
-| `clin_ARTemis` | ARTemis/PBCP | Clinical only (8 features) | CV | 72 |
-| `multi_TransNEO` | TransNEO | Multi-omics (74 features) | CV | 147 |
-| `multi_ARTemis` | ARTemis/PBCP | Multi-omics (74 features) | CV | 72 |
-| `multi_Trans_ART` | TransNEO + ARTemis (combined) | Multi-omics (74 features) | CV | 219 |
-| `OOD_multi_Trans_ART` | TransNEO (train) -> ARTemis (test) | Multi-omics (74 features) | OOD (fixed train/test split, different cohorts) | 147 train / 72 test |
-
-
-## Environment
+## Installation
 
 ### Requirements
 
-* Python 3.10
-* CUDA 12.1+ (GPU strongly recommended; CPU fallback available but slow)
-* TabPFN v3: please download `tabpfn-v3-regressor-v3_default.ckpt` from
-  [Prior-Labs/tabpfn_3](https://huggingface.co/Prior-Labs/tabpfn_3/tree/main) and place it in the
-  `/tabpfn` folder.
+- Python 3.10
+- CUDA 12.1+ (a GPU is strongly recommended; the CPU fallback works but is slow)
+- R ≥ 4.3 (only needed for the CTR baseline)
+
+### Setup
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/vntuyen/FDR.git
 cd FDR
 
-# 2. Create virtual environment
+# 2. Create and activate a virtual environment
 python3.10 -m venv fdr_env
 source fdr_env/bin/activate          # Linux / macOS
 # fdr_env\Scripts\activate           # Windows
@@ -59,108 +94,130 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+### TabPFN checkpoint
 
+Download `tabpfn-v3-regressor-v3_default.ckpt` from [Prior-Labs/tabpfn_3](https://huggingface.co/Prior-Labs/tabpfn_3/tree/main) and place it in the `tabpfn/` folder of the repository:
 
-> **Before running:**  The checkpoint path is currently an absolute HPC scratch path (`TABPFN_CKPT_PATH = "/scratch/.../FDR/tabpfn/tabpfn-v3-regressor-v3_default.ckpt"`).
-> Update that constant near the top of config.py file to match the `/tabpfn` folder
-> convention above, e.g.
-> `TABPFN_CKPT_PATH = os.path.join(os.path.dirname(__file__), "tabpfn", "tabpfn-v3-regressor-v3_default.ckpt")`,
-> before running either script.
+```
+FDR/tabpfn/tabpfn-v3-regressor-v3_default.ckpt
+```
 
-## Expected data layout
+To keep the checkpoint elsewhere (for example, on an HPC scratch drive), set:
+
+```bash
+export TABPFN_CKPT_PATH=/path/to/tabpfn-v3-regressor-v3_default.ckpt
+```
+
+### CTR baseline 
+CTR runs in R and is called from Python through `Rscript`. Install the R packages:
+
+```r
+install.packages(c("rpart", "rpart.plot", "remotes"))
+remotes::install_github("susanathey/causalTree")
+```
+
+If `Rscript` is not on your `PATH`, set `export RSCRIPT_BIN=/path/to/Rscript`. Without R, all other methods still run; CTR is reported as failed and skipped.
+
+## Data
+
+All six datasets are derived from two neoadjuvant breast cancer cohorts, downloaded from their [Github repository)](https://github.com/micrisor/NAT-ML/tree/main/inputs):
+
+- **TransNEO**: Sammut et al., *Nature*, 2022.
+- **ARTemis/PBCP**: Earl et al., *Lancet Oncology*, 2015.
+
+All datasets share a continuous outcome (`RCB.score`) and four treatment plans (`TP1`–`TP4`). Each plan is a taxane backbone with optional anthracycline and anti-HER2 add-ons.
+
+| Dataset key | Cohort(s) | Features | Scenario | N |
+|---|---|---|---|---|
+| `clin_TransNEO` | TransNEO | Clinical (8) | CV | 147 |
+| `clin_ARTemis` | ARTemis/PBCP | Clinical (8) | CV | 72 |
+| `multi_TransNEO` | TransNEO | Multi-omics (74) | CV | 147 |
+| `multi_ARTemis` | ARTemis/PBCP | Multi-omics (74) | CV | 72 |
+| `multi_Trans_ART` | TransNEO + ARTemis | Multi-omics (74) | CV | 219 |
+| `OOD_multi_Trans_ART` | TransNEO → ARTemis | Multi-omics (74) | OOD | 147 train / 72 test |
+
+**Data availability.** This repository does not redistribute patient data. Please obtain the cohort data through the access routes described in the original publications. Then place the processed files as follows:
 
 ```
 input/
-  clin_TransNEO/clin_TransNEO.csv
-  clin_ARTemis/clin_ARTemis.csv
-  multi_TransNEO/multi_TransNEO.csv
-  multi_ARTemis/multi_ARTemis.csv
-  multi_Trans_ART/multi_Trans_ART.csv
-  OOD_multi_Trans_ART/
-    OOD_multi_Trans_ART_train.csv
-    OOD_multi_Trans_ART_test.csv
+├── clin_TransNEO/clin_TransNEO.csv
+├── clin_ARTemis/clin_ARTemis.csv
+├── multi_TransNEO/multi_TransNEO.csv
+├── multi_ARTemis/multi_ARTemis.csv
+├── multi_Trans_ART/multi_Trans_ART.csv
+└── OOD_multi_Trans_ART/
+    ├── OOD_multi_Trans_ART_train.csv
+    └── OOD_multi_Trans_ART_test.csv
 ```
 
-`output/` is created automatically by the scripts; it does not need to exist beforehand.
-
-Running the pipeline produces, under `<base_path>/output/`:
-
-- `output/<dataset_name>/` -- per-method prediction files (`<dataset>_<method>_REC.csv` /
-  `_REC_all_runs.csv`), per-dataset metric summaries (`Recovery_Metrics_summary.csv`, `RCB_Score_Comparison.csv`),
-  and plots (Recovery Ratio, RCB comparison).
-- `output/output_AllDatasets_Metrics.csv` -- combined CAU/RRD/RR per (dataset, method) with
-  mean, across-run std, and 95% bootstrap CI.
-- `output/output_AllMethods_CrossDataset_Mean_CI95.csv` -- mean + 95% CI across all six
-  datasets, per method, for CAU/RRD/RR.
-- `output/output_Clinical_vs_Multiomics_within_cohort.png` / `.csv` -- the paired,
-  within-cohort Clinical-vs-Multi-omics figure (FDR and all-method mean) for TransNEO and
-  ARTemis.
-
-## Methods evaluated
-
-**FDR** (proposed) plus nine baselines across four families:
-
-| Method | Key | Family |
-|---|---|---|
-| **FDR** | `FDR` | Proposed (TabPFN T-Learner) |
-| CatBoost | `CB` | A. Classical |
-| XGBoost | `XGB` | A. Classical |
-| S-Learner | `S_L` | B. Meta-Learner |
-| X-Learner | `X_L` | B. Meta-Learner |
-| DR-Learner | `DR_L` | B. Meta-Learner |
-| R-Learner | `R_L` | B. Meta-Learner |
-| Causal Forest | `CF` | C. Causal |
-| CUTS | `CUTS` | D. Modern SOTA  |
-| BITES | `BITES` | D. Modern SOTA |
-
-## Results
-
-Summary of the headline findings (see the paper for full detail, confidence intervals,
-and significance tests):
-
-- **Per-dataset ranking (Coverage-Adjusted Uplift, CAU):** FDR ranks 1st on 3 of 6 datasets
-  (ARTemis multi-omics, the combined TransNEO+ARTemis CV setting, and the OOD setting),
-  2nd on both clinical-only datasets, and 3rd on TransNEO multi-omics -- never below 3rd.
-- **Cross-dataset summary (mean ± 95% CI across all 6 datasets):** FDR attains the highest
-  mean CAU (7.88 pp [4.62, 10.98]), RRD (25.12 pp [14.14, 36.24]), and Recovery Ratio
-  (2.61 [1.86, 3.34]) of all ten methods. Its CI is clearly separated from zero/one and
-  from R-Learner (significantly negative), but overlaps with CatBoost, XGBoost, X-Learner,
-  S-Learner, and CUTS -- so FDR's advantage over those specific baselines is directionally
-  consistent rather than statistically established on this evidence alone.
-- **Clinical vs. multi-omics:** adding multi-omics features roughly triples FDR's CAU
-  (TransNEO: 2.2 -> 8.5 pp; ARTemis: 2.7 -> 9.9 pp), with the same direction of effect,
-  at smaller magnitude, across the other nine methods.
-- **Out-of-distribution validation:** training on TransNEO and testing without retraining
-  on the independent ARTemis cohort, FDR achieves the highest CAU of all ten methods
-  (11.75 pp vs. 8.89 pp for the next-best baseline, XGBoost), consistent with its matched
-  in-distribution CV result (12.27 pp) -- though S-Learner edges ahead of FDR on RRD and
-  Recovery Ratio in this specific setting.
-- **Statistical significance:** by permutation test (1000 permutations), FDR's CAU is
-  significant at p<0.05 on 5 of 6 datasets (TransNEO clinical, p=0.13, is the marginal
-  exception).
-
-All numbers above are reproducible from `output/output_AllDatasets_Metrics.csv` and
-`output/output_AllMethods_CrossDataset_Mean_CI95.csv` after running the pipeline.
+<!-- TODO: if a preprocessing script or data dictionary is released, link it here. -->
 
 ## Usage
 
 ```bash
-# Run everything (FDR + 9 baselines, all 6 datasets) and evaluate
+# Run everything (FDR + 10 baselines on all 6 datasets), then evaluate
 python run_experiments.py
 
-# Evaluation only, reusing existing output/
+# Evaluation only, reusing an existing output/ folder
 python run_experiments.py --no-run
 
-# Run only, skip evaluation
+# Run only, skipping evaluation
 python run_experiments.py --no-eval
 
-# Subset of datasets / methods
+# A subset of datasets or methods
 python run_experiments.py --datasets multi_ARTemis OOD_multi_Trans_ART
 python run_experiments.py --methods FDR CB XGB
 
-# Fewer repeated resamples (default: 10) or folds (default: 5)
+# Number of repeated runs and CV folds
 python run_experiments.py --n-repeats 5 --k 5
 ```
 
+The paper reports five repeated runs of 5-fold cross-validation.
+<!-- TODO: check the --n-repeats default in run_experiments.py matches the paper. -->
 
+## Outputs
+
+The `output/` folder is created automatically.
+
+**Per dataset** (`output/<dataset>/`):
+
+- `<dataset>_<method>_REC.csv` / `_REC_all_runs.csv`: per-patient recommendations for each method.
+- `<dataset>_Recovery_Metrics_summary.csv`: CAU, RRD and Recovery Ratio (mean ± std across runs, with 95% bootstrap CI).
+- `<dataset>_RCB_Score_Comparison.csv`: average RCB for followers vs. non-followers.
+- `<dataset>_Statistical_Validation.csv`: bootstrap CIs, permutation p-values, IPW-adjusted CAU, E-values, and IPW/DR policy value.
+- Recovery Ratio and RCB comparison plots.
+
+**Across datasets** (`output/`):
+
+| File | Contents | Paper                                     |
+|---|---|-------------------------------------------|
+| `output_AllDatasets_Metrics.csv` | CAU/RRD/RR for every (dataset, method): mean, across-run std, 95% CI | —                                         |
+| `output_AllMethods_CrossDataset_Mean_CI95.csv` | Mean and 95% CI across the six settings, per method | Table 4: Cross-dataset table              |
+| `output_AllDatasets_CAU_pp_Formatted.csv` | CAU as "mean ± std" strings, datasets × methods | Table 5: CAU table                        |
+| `output_Clinical_vs_Multiomics_within_cohort.png` / `.csv` | Clinical vs. multi-omics, FDR and all-method mean, per cohort | Figure 3: Clinical vs. multi-omics figure |
+| `output_StatisticalValidation_AllDatasets.csv` | All validation statistics, with Bonferroni and BH-adjusted p-values | —                                         |
+| `output_FDR_Significance_Table.csv` | Per-dataset CAU CI, permutation p, BH p, E-value and IPW CAU for FDR | Table 6: Significance table               |
+
+
+## Methods compared
+
+| Method | Key | Family                          |
+|---|---|---------------------------------|
+| **FDR (ours)** | `FDR` | Foundation model                |
+| CatBoost | `CB` | Classical ML                    |
+| XGBoost | `XGB` | Classical ML                    |
+| S-Learner | `S_L` | Meta-learner                    |
+| X-Learner | `X_L` | Meta-learner                    |
+| DR-Learner | `DR_L` | Meta-learner                    |
+| R-Learner | `R_L` | Meta-learner                    |
+| Causal Forest | `CF` | Causality model                 |
+| CTR | `CTR` | Causality model                 |
+| CUTS | `CUTS` | Recent treatment recommendation |
+| BITES | `BITES` | Recent treatment recommendation |
+
+
+
+## Acknowledgements
+
+This work uses data  by Prior Labs.
 

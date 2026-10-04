@@ -10,14 +10,18 @@ Groups (see config.METHOD_META for labels used in tables/plots):
   A. Classical regressors wrapped with TP-toggling counterfactual prediction
      (CatBoost,  XGBoost)
   B. Meta-learners (S-, X-, DR-, R-Learner)
-  C. Causal Forest (DML)
+  C. Causal baselines: Causal Forest (DML), CTR (Causal Tree, R backend)
   D. Modern SOTA (CUTS, BITES)
 
 """
 
+import os
+import shutil
+import subprocess
+import tempfile
+
 import numpy as np
 import pandas as pd
-import torch
 
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.linear_model import Ridge, LogisticRegression
@@ -60,11 +64,6 @@ def _wrap_sklearn(model_factory):
 # ============================================================
 
 def _classical_models():
-    # Reduced to CatBoost and XGBoost only (Neural Net, Random Forest, SVR,
-    # and Linear Regression removed from the exposed baseline set -- see
-    # config.METHOD_META). RandomForestRegressor is still used internally
-    # elsewhere in this file (recommend_rsf_tlearner's Causal Forest
-    # fallback), so that import is kept.
     return {
         "CB":  _wrap_sklearn(lambda: CatBoostRegressor(verbose=0, random_state=config.SEED)),
         "XGB": _wrap_sklearn(lambda: XGBRegressor(random_state=config.SEED, verbosity=0)),
@@ -240,8 +239,7 @@ def recommend_r_learner(X_train, y_train, X_test, treatment_plans):
 # ============================================================
 
 def recommend_causal_forest(X_train, y_train, X_test, treatment_plans):
-    """Causal Forest (DML). Falls back to a RandomForest T-Learner if econml
-    is unavailable or fitting fails for an arm."""
+    """Causal Forest (DML). """
     feature_cols = [c for c in X_train.columns if c not in treatment_plans]
     X_tr = X_train[feature_cols].values
     X_te = X_test[feature_cols].values
@@ -273,6 +271,116 @@ def recommend_causal_forest(X_train, y_train, X_test, treatment_plans):
     return predicted_outcomes
 
 
+# ------------------------------------------------------------
+# CTR: Causality-based Therapy Recommendation (Causal Tree)
+# Official code: https://github.com/vntuyen/ctr
+# ------------------------------------------------------------
+
+CTR_R_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ctr_causaltree.R")
+CTR_TIMEOUT_SEC = 1800
+
+
+def _find_rscript():
+    """
+    Locate the Rscript executable, in this order:
+      1. the RSCRIPT_BIN environment variable (full path to Rscript/Rscript.exe)
+      2. `Rscript` on PATH
+      3. Windows default install folders (R is not added to PATH by the
+         Windows installer): %ProgramFiles%/R/R-*/bin/Rscript.exe, newest first.
+    Returns the path, or None if R cannot be found.
+    """
+    import glob
+
+    env = os.environ.get("RSCRIPT_BIN")
+    if env:
+        env = os.path.expanduser(env.strip().strip('"'))
+        if os.path.isfile(env):
+            return env
+        found = shutil.which(env)
+        if found:
+            return found
+        print(f"      [CTR] RSCRIPT_BIN='{env}' does not exist; searching elsewhere.")
+
+    found = shutil.which("Rscript")
+    if found:
+        return found
+
+    if os.name == "nt":
+        roots = {os.environ.get(v) for v in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)")}
+        roots |= {r"C:\Program Files", os.path.expanduser(r"~\AppData\Local\Programs")}
+        candidates = []
+        for root in filter(None, roots):
+            candidates += glob.glob(os.path.join(root, "R", "R-*", "bin", "Rscript.exe"))
+        if candidates:
+            def _ver(path):
+                v = os.path.basename(os.path.dirname(os.path.dirname(path)))[2:]
+                return tuple(int(x) if x.isdigit() else 0 for x in v.split("."))
+            return sorted(candidates, key=_ver)[-1]
+    return None
+
+
+def recommend_ctr(X_train, y_train, X_test, treatment_plans):
+    """
+    CTR (causal-tree therapy recommendation). For each treatment plan,
+    fits one honest causal tree (Athey & Imbens 2016; R package
+    `causalTree`) of that plan vs. all other plans, pruned by cross-validated
+    error, exactly as in CTR's `build_causal_tree_model`. The fitting is done
+    in R by `ctr_causaltree.R`; see that file for the (small) adaptations.
+
+    The per-arm columns of the returned frame hold the predicted
+    CONDITIONAL TREATMENT EFFECT of each plan on RCB.score (plan vs. the
+    rest), not a predicted outcome. Since lower RCB is better, REC_TP is the
+    plan with the most negative effect. Arms whose effect cannot be
+    estimated in this training fold (NA) are never recommended.
+
+    Requires R (>= 4.3) with the packages `causalTree` (GitHub:
+    susanathey/causalTree) and `rpart`.
+    """
+    rscript = _find_rscript()
+    if rscript is None:
+        raise RuntimeError(
+            "CTR could not find Rscript (R with the causalTree package). Install R, "
+            "or set RSCRIPT_BIN to the full path, e.g. "
+            "RSCRIPT_BIN='C:/Program Files/R/R-4.3.0/bin/Rscript.exe'."
+        )
+
+    # Safe, formula-friendly column names for R: X1..Xp, TP names, Y.
+    feature_cols = [c for c in X_train.columns if c not in treatment_plans]
+    rename = {c: f"X{i + 1}" for i, c in enumerate(feature_cols)}
+    tp_present = [tp for tp in treatment_plans if tp in X_train.columns]
+
+    train_df = X_train[feature_cols + tp_present].rename(columns=rename).copy()
+    train_df["Y"] = np.asarray(y_train, dtype=float)
+    test_df = X_test[feature_cols + tp_present].rename(columns=rename).copy()
+
+    with tempfile.TemporaryDirectory(prefix="ctr_") as tmp:
+        train_file = os.path.join(tmp, "train.csv")
+        test_file = os.path.join(tmp, "test.csv")
+        out_file = os.path.join(tmp, "effects.csv")
+        train_df.to_csv(train_file, index=False)
+        test_df.to_csv(test_file, index=False)
+
+        cmd = [rscript, CTR_R_SCRIPT, train_file, test_file, out_file,
+               "Y", str(int(config.SEED)), ",".join(tp_present)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=CTR_TIMEOUT_SEC)
+        if proc.returncode != 0 or not os.path.exists(out_file):
+            raise RuntimeError(f"CTR R backend failed:\n{proc.stderr[-2000:]}")
+        for line in proc.stderr.splitlines():
+            if line.startswith("  [CTR]"):
+                print(f"      {line.strip()}")
+        effects = pd.read_csv(out_file)
+
+    predicted_outcomes = pd.DataFrame(index=X_test.index)
+    for tp in treatment_plans:
+        if tp in effects.columns:
+            predicted_outcomes[tp] = pd.to_numeric(effects[tp], errors="coerce").values
+        else:
+            predicted_outcomes[tp] = np.nan
+    ranking = predicted_outcomes[treatment_plans].fillna(np.inf)
+    predicted_outcomes["REC_TP"] = ranking.idxmin(axis=1)
+    return predicted_outcomes
+
+
 # ============================================================
 # D. Modern SOTA baselines
 # ============================================================
@@ -280,6 +388,7 @@ def recommend_causal_forest(X_train, y_train, X_test, treatment_plans):
 def recommend_bites(X_train, y_train, X_test, treatment_plans):
     """BITES: MMD-balanced representation network with arm-specific heads."""
     try:
+        import torch  # imported lazily: only BITES needs torch
         import torch.nn as nn
     except ImportError:
         return recommend_t_learner_gb(X_train, y_train, X_test, treatment_plans)
@@ -413,8 +522,8 @@ def recommend_ep_learner(X_train, y_train, X_test, treatment_plans):
 def get_baseline_methods() -> dict:
     """
     Returns the full baseline method registry (everything except FDR):
-    9 baselines across four families -- A. Classical (CatBoost, XGBoost),
-    B. Meta-Learner (S/X/DR/R-Learner), C. Causal (Causal Forest), and
+    10 baselines across four families -- A. Classical (CatBoost, XGBoost),
+    B. Meta-Learner (S/X/DR/R-Learner), C. Causal (Causal Forest, CTR), and
     D. Modern SOTA (CUTS, BITES). TARNet, DragonNet, and EP-Learner are
     intentionally excluded from this set (recommend_ep_learner remains
     defined above but is not wired in, in case it is reinstated later).
@@ -426,6 +535,7 @@ def get_baseline_methods() -> dict:
         "DR_L":  recommend_dr_learner,
         "R_L":   recommend_r_learner,
         "CF":    recommend_causal_forest,
+        "CTR":   recommend_ctr,
         "CUTS":  recommend_cuts,
         "BITES": recommend_bites,
     })

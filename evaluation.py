@@ -230,37 +230,54 @@ def results_evaluation(data_name, output_path):
         }
 
         boot = sv.bootstrap_ci_recovery_metrics(df, outcome_col)
-        row.update({f"boot_{k}": v for k, v in boot.items()})
+        row["N_Patients"] = boot.get("n_patients", np.nan)
+        row.update({f"boot_{k}": v for k, v in boot.items() if k not in ("n", "n_boot", "ci_level")})
 
         perm_cau = sv.permutation_test_recovery_metrics(df, outcome_col, metric="CAU_pp")
-        row["CAU_pp_perm_p"] = perm_cau.get("p_value", np.nan)
+        row["CAU_pp_perm_p"] = perm_cau.get("p_value", np.nan)                 # two-sided
+        row["CAU_pp_perm_p_greater"] = perm_cau.get("p_value_greater", np.nan)  # one-sided: CAU > chance
         row["CAU_pp_perm_observed"] = perm_cau.get("observed", np.nan)
+        row["CAU_pp_perm_null_mean"] = perm_cau.get("null_mean", np.nan)
 
         adj = sv.compute_adjusted_cau(df, treatment_plans, outcome_col)
         row.update(adj)
 
-        # E-value computed on the point Recovery Ratio (a risk ratio on the
-        # pCR outcome) and on its bootstrap CI bound closest to the null,
-        # using the SAME bootstrap draws already computed above rather than
-        # a separate analytic CI.
-        rr_point = boot.get("Recovery_Ratio_boot_mean", np.nan)
+        # E-value on the observed Recovery Ratio (a risk ratio on pCR) and on
+        # its patient-level bootstrap CI bound closest to the null.
+        rr_point = boot.get("Recovery_Ratio_observed", np.nan)
         rr_lo = boot.get("Recovery_Ratio_ci_lo", np.nan)
         rr_hi = boot.get("Recovery_Ratio_ci_hi", np.nan)
         evalue = sv.compute_e_value_for_ci(rr_point, rr_lo, rr_hi)
         row.update({f"Recovery_Ratio_{k}": v for k, v in evalue.items()})
 
+        # Off-policy value on RCB.score (lower = better). DR needs per-arm
+        # predicted OUTCOMES; methods that output effects (CTR) get IPW only.
         if all(f"PROP_{tp}" in df.columns for tp in treatment_plans):
-            perm_dr = sv.permutation_test_dr_uplift(df, treatment_plans, outcome_col)
-            row["DR_uplift_perm_p"] = perm_dr.get("p_value", np.nan)
-            row["DR_uplift_perm_observed"] = perm_dr.get("observed", np.nan)
-            dr_boot = sv.bootstrap_ci_dr_uplift(df, treatment_plans, outcome_col)
-            row.update({f"boot_{k}": v for k, v in dr_boot.items()})
+            q_cols = (None if name in sv.NON_OUTCOME_PREDICTION_METHODS
+                      else sv.prediction_columns(df, treatment_plans))
+            try:
+                pv = sv.evaluate_policy_value(df, treatment_plans, outcome_col, q_cols=q_cols)
+                row.update({k: v for k, v in pv.items() if k != "N"})
+                perm_dr = sv.permutation_test_dr_uplift(df, treatment_plans, outcome_col, q_cols=q_cols)
+                row["DR_uplift_perm_p"] = perm_dr.get("p_value", np.nan)
+                row["DR_uplift_perm_p_less"] = perm_dr.get("p_value_less", np.nan)
+                perm_ipw = sv.permutation_test_dr_uplift(df, treatment_plans, outcome_col,
+                                                         q_cols=q_cols, metric="IPW_uplift")
+                row["IPW_uplift_perm_p"] = perm_ipw.get("p_value", np.nan)
+                row["IPW_uplift_perm_p_less"] = perm_ipw.get("p_value_less", np.nan)
+                dr_boot = sv.bootstrap_ci_dr_uplift(df, treatment_plans, outcome_col, q_cols=q_cols)
+                row.update({f"boot_{k}": v for k, v in dr_boot.items()
+                            if k not in ("n", "n_boot", "ci_level")})
+            except Exception as e:
+                print(f"    [WARN] Policy-value evaluation failed for '{name}': {e}")
 
         statistical_validation_rows.append(row)
 
     if statistical_validation_rows:
         sv_df = pd.DataFrame(statistical_validation_rows)
-
+        sv_path = os.path.join(output_path, f"{data_name}_Statistical_Validation.csv")
+        sv_df.round(6).to_csv(sv_path, index=False)
+        print(f"  [SAVED] {sv_path}  (bootstrap CIs, permutation tests, IPW/DR policy value, E-values)")
         result["statistical_validation"] = sv_df
     else:
         print(f"  [INFO] No REC files available for '{data_name}' -- skipping statistical validation.")
@@ -284,9 +301,9 @@ def results_evaluation(data_name, output_path):
             smd_table = sv.compute_smd_table(smd_input, treatment_plans)
             smd_summary = sv.summarize_smd_table(smd_table)
 
-            smd_summary_path = os.path.join(output_path, f"{data_name}_CovariateBalance_SMD_summary.csv")
-            smd_summary.to_csv(smd_summary_path, index=False)
-            print(f"  [SAVED] {smd_summary_path}")
+            # smd_summary_path = os.path.join(output_path, f"{data_name}_CovariateBalance_SMD_summary.csv")
+            # smd_summary.to_csv(smd_summary_path, index=False)
+            # print(f"  [SAVED] {smd_summary_path}")
 
             result["smd_table"] = smd_table
             result["smd_summary"] = smd_summary
@@ -354,6 +371,7 @@ def results_evaluation(data_name, output_path):
                 "boot_Recovery_Ratio_ci_lo": "Recovery_Ratio_ci95_lo",
                 "boot_Recovery_Ratio_ci_hi": "Recovery_Ratio_ci95_hi",
                 "CAU_pp_perm_p": "CAU_pp_perm_p",
+                "CAU_pp_perm_p_greater": "CAU_pp_perm_p_greater",
             }
             ci_df = sv_df[[c for c in ci_cols if c in sv_df.columns]].rename(columns=ci_cols)
             agg = agg.merge(ci_df, on="Method", how="left")
@@ -946,6 +964,185 @@ def build_multiomics_method_ranking(combined, value_col, output_folder, fname_st
 
 
 # ============================================================
+# Statistical Significance and Robustness: per-dataset summary table
+# ============================================================
+#
+# One row per evaluation setting for a single method (FDR by default):
+#   CAU (pp) with patient-level bootstrap 95% CI | one-sided permutation p |
+#   BH-adjusted p | E-value (point / CI bound) | IPW CAU (pp)
+# The IPW CAU is compute_adjusted_cau's CAU_pp_adj (each patient weighted by
+# 1 / propensity of the arm actually received).
+# Written as a CSV (raw numbers) and as a ready-to-paste LaTeX table
+# (tab:fdr_significance). A second CSV counts, per method, the datasets on
+# which its CAU is significant before / after BH correction -- the numbers
+# quoted in the "Statistical Significance and Robustness" text.
+
+SIGNIFICANCE_ALPHA = 0.05
+
+
+def _latex_num(v, decimals=2):
+    """Number for a LaTeX cell; negatives in math mode ($-0.14$), NaN -> '--'."""
+    if v is None or not np.isfinite(v):
+        return "--"
+    s = f"{v:.{decimals}f}"
+    if s.startswith("-") and float(s) != 0.0:
+        return f"${s}$"
+    return s.lstrip("-")  # avoid "-0.00"
+
+
+def _latex_p(p, decimals=3):
+    if p is None or not np.isfinite(p):
+        return "--"
+    floor = 10 ** (-decimals)
+    return f"$<${floor:.{decimals}f}" if p < floor else f"{p:.{decimals}f}"
+
+
+def _latex_dataset_label(data_name):
+    """Short LaTeX row label; falls back to the paper display name."""
+    display = str(config.DATASET_NAME_MAP.get(data_name, data_name))
+    low = display.lower() + " " + data_name.lower()
+    if "ood" in low:
+        return r"NEO$\rightarrow$ART (OOD)"
+    if "combined" in low or "trans_art" in low or ("transneo" in low and "artemis" in low):
+        return "NEO+ART (CV)"
+    return display.replace("&", r"\&").replace("_", r"\_")
+
+
+def build_significance_table(sv_all, combined, output_folder, method="FDR",
+                             bh_col=None, decimals=2):
+    """
+    Build the per-dataset statistical-validation table for `method`.
+
+    Inputs
+      sv_all   : concatenated per-(dataset, method) statistical-validation
+                 table, AFTER apply_multiplicity_correction (so it carries the
+                 BH-adjusted one-sided CAU p-value).
+      combined : per-(dataset, method) recovery summary; supplies the
+                 across-run mean CAU_pp used as the point estimate, so the
+                 table matches tab:cau_rank. Falls back to the pooled
+                 bootstrap point estimate if missing.
+    """
+    # Column names produced by statistical_validation.py and results_evaluation():
+    p_col = "CAU_pp_perm_p_greater"                    # permutation_test_recovery_metrics (one-sided)
+    bh_col = bh_col or f"{p_col}_bh_p"                 # apply_multiplicity_correction(prefix=f"{p_col}_")
+    ci_lo_col, ci_hi_col = "boot_CAU_pp_ci_lo", "boot_CAU_pp_ci_hi"   # bootstrap_ci_recovery_metrics
+    obs_col = "boot_CAU_pp_observed"                   # pooled point estimate (fallback only)
+    e_point_col = "Recovery_Ratio_e_value"             # compute_e_value_for_ci: point estimate
+    e_ci_col = "Recovery_Ratio_e_value_ci"             # compute_e_value_for_ci: CI bound nearest RR = 1
+    ipw_col = "CAU_pp_adj"                             # compute_adjusted_cau (already in pp)
+
+    missing = [c for c in (p_col, bh_col, ci_lo_col, ci_hi_col, e_point_col, e_ci_col, ipw_col)
+               if c not in sv_all.columns]
+    if missing:
+        print(f"  [WARN] Significance table: column(s) {missing} not found; shown as '--'.")
+
+    def get(row, col):
+        return _safe_float(row[col], np.nan) if col and col in row.index else np.nan
+
+    # ---- Per-dataset rows for `method` ----
+    order = [d for d in config.DATASET_ROW_ORDER] if hasattr(config, "DATASET_ROW_ORDER") else []
+    name_map = getattr(config, "DATASET_NAME_MAP", {})
+    sub = sv_all[sv_all["Method"] == method].copy()
+    # Order rows as in the paper (DATASET_ROW_ORDER holds display names).
+    rank = {d: i for i, d in enumerate(order)}
+    sub["_order"] = sub["DataSet"].map(lambda d: rank.get(name_map.get(d, d), len(rank)))
+    sub = sub.sort_values("_order")
+
+    rows = []
+    for _, r in sub.iterrows():
+        data_name = r["DataSet"]
+        point = np.nan
+        if combined is not None and "CAU_pp" in combined.columns:
+            m = combined[(combined["DataSet"] == data_name) & (combined["Method"] == method)]
+            if not m.empty:
+                point = _safe_float(m["CAU_pp"].iloc[0], np.nan)
+        if not np.isfinite(point):
+            point = get(r, obs_col)
+        rows.append({
+            "DataSet": data_name,
+            "Dataset": name_map.get(data_name, data_name),
+            "Label": _latex_dataset_label(data_name),
+            "CAU_pp": point,
+            "CAU_pp_ci95_lo": get(r, ci_lo_col),
+            "CAU_pp_ci95_hi": get(r, ci_hi_col),
+            "p_one_sided": get(r, p_col),
+            "p_BH": get(r, bh_col),
+            "E_value_point": get(r, e_point_col),
+            "E_value_ci_bound": get(r, e_ci_col),
+            "IPW_CAU_pp": get(r, ipw_col),
+        })
+    table = pd.DataFrame(rows)
+    if table.empty:
+        print(f"  [INFO] No statistical-validation rows for '{method}' -- significance table skipped.")
+        return table
+
+    csv_path = os.path.join(output_folder, f"{OUTPUT_FOLDER_NAME}_{method}_Significance_Table.csv")
+    table.drop(columns=["Label"]).round(4).to_csv(csv_path, index=False)
+    print(f"[SAVED] {csv_path}")
+
+    # ---- LaTeX ----
+    body = []
+    for _, t in table.iterrows():
+        cau = (f"{_latex_num(t['CAU_pp'], decimals)} "
+               f"({_latex_num(t['CAU_pp_ci95_lo'], decimals)}, {_latex_num(t['CAU_pp_ci95_hi'], decimals)})")
+        ev = f"{_latex_num(t['E_value_point'], decimals)} / {_latex_num(t['E_value_ci_bound'], decimals)}"
+        body.append(f"{t['Label']} & {cau} & {_latex_p(t['p_one_sided'])} & {_latex_p(t['p_BH'])} "
+                    f"& {ev} & {_latex_num(t['IPW_CAU_pp'], decimals)} \\\\")
+
+    label_width = max(len(line.split(" & ")[0]) for line in body)
+    body = [line.split(" & ", 1)[0].ljust(label_width) + " & " + line.split(" & ", 1)[1] for line in body]
+
+    method_tex = method.replace("_", r"\_")
+    latex = "\n".join([
+        r"\begin{table*}[h]",
+        r"\centering",
+        rf"\caption{{Statistical validation of {method_tex} per dataset: patient-level bootstrap 95\% "
+        r"confidence interval for CAU, one-sided permutation $p$-value, Benjamini--Hochberg (BH) "
+        r"adjusted $p$-value, E-value for unmeasured confounding (point estimate / confidence-interval "
+        r"bound), and inverse-propensity-weighted (IPW) CAU.}",
+        rf"\label{{tab:{method.lower()}_significance}}",
+        r"\begin{tabular}{lccccc}",
+        r"\hline",
+        r"\textbf{Dataset} & \textbf{CAU (pp)} & \textbf{$p$} & \textbf{BH-adjusted} "
+        r"& \textbf{E-value} & \textbf{IPW CAU} \\",
+        r" & \textbf{(95\% CI)} & \textbf{(one-sided)} & \textbf{$p$} & & \textbf{(pp)} \\",
+        r"\hline",
+        *body,
+        r"\hline",
+        r"\end{tabular}",
+        r"\end{table*}",
+        "",
+    ])
+    tex_path = os.path.join(output_folder, f"{OUTPUT_FOLDER_NAME}_{method}_Significance_Table.tex")
+    with open(tex_path, "w", encoding="utf-8") as f:
+        f.write(latex)
+    print(f"[SAVED] {tex_path}")
+
+    # ---- Per-method count of significant datasets (for the text) ----
+    if bh_col and p_col in sv_all.columns:
+        flags = sv_all[["Method", "DataSet"]].copy()
+        flags["Sig_raw"] = pd.to_numeric(sv_all[p_col], errors="coerce") < SIGNIFICANCE_ALPHA
+        flags["Sig_BH"] = pd.to_numeric(sv_all[bh_col], errors="coerce") < SIGNIFICANCE_ALPHA
+        flags["Dataset"] = flags["DataSet"].map(lambda d: name_map.get(d, d))
+        counts = flags.groupby("Method").agg(
+            N_Datasets=("DataSet", "nunique"),
+            N_Significant_Unadjusted=("Sig_raw", "sum"),
+            N_Significant_BH=("Sig_BH", "sum"),
+        )
+        counts["BH_Significant_Datasets"] = (flags[flags["Sig_BH"]]
+                                             .groupby("Method")["Dataset"]
+                                             .agg(lambda s: "; ".join(map(str, s))))
+        counts = (counts.fillna({"BH_Significant_Datasets": ""}).reset_index()
+                        .sort_values(["N_Significant_BH", "N_Significant_Unadjusted"], ascending=False))
+        cnt_path = os.path.join(output_folder, f"{OUTPUT_FOLDER_NAME}_AllMethods_Significance_Counts.csv")
+        counts.to_csv(cnt_path, index=False)
+        print(f"[SAVED] {cnt_path}  (datasets with CAU significant at alpha={SIGNIFICANCE_ALPHA}, "
+              f"before / after BH)")
+
+    return table
+
+
+# ============================================================
 # Batch evaluation across all datasets/scenarios
 # ============================================================
 
@@ -985,7 +1182,7 @@ def evaluate_all_datasets(output_folder):
                 "RRD", "RRD_std", "RRD_ci95_lo", "RRD_ci95_hi",
                 "RRD_pp", "RRD_pp_std", "RRD_pp_ci95_lo", "RRD_pp_ci95_hi",
                 "extra_recoveries", "extra_recoveries_std",
-                "CAU_pp_perm_p",
+                "CAU_pp_perm_p", "CAU_pp_perm_p_greater",
                 "N_Runs", "N_Valid_CAU_Runs",
             ]
             keep_cols = [c for c in keep_cols if c in ratio_df.columns]
@@ -1024,6 +1221,48 @@ def evaluate_all_datasets(output_folder):
     combined.to_csv(metrics_path, index=False)
     print(f"\n[SAVED] {metrics_path}  (CAU/RRD/Recovery-Ratio, mean +/- std "
           f"across runs, with 95% bootstrap CI where available)")
+
+    # ---- Statistical validation across all datasets (+ multiplicity
+    #      correction over every (dataset, method) comparison) ----
+    if all_statistical_validation_tables:
+        sv_all = pd.concat(all_statistical_validation_tables, ignore_index=True)
+        if "CAU_pp_perm_p_greater" in sv_all.columns:
+            sv_all = sv.apply_multiplicity_correction(sv_all, p_col="CAU_pp_perm_p_greater",
+                                                      prefix="CAU_pp_perm_p_greater_")
+        if "DR_uplift_perm_p_less" in sv_all.columns:
+            sv_all = sv.apply_multiplicity_correction(sv_all, p_col="DR_uplift_perm_p_less",
+                                                      prefix="DR_uplift_perm_p_less_")
+        sv_all.insert(1, "Dataset", sv_all["DataSet"].map(config.DATASET_NAME_MAP))
+        sv_all_path = os.path.join(output_folder, f"{OUTPUT_FOLDER_NAME}_StatisticalValidation_AllDatasets.csv")
+        sv_all.round(6).to_csv(sv_all_path, index=False)
+        print(f"[SAVED] {sv_all_path}  (per dataset x method; Bonferroni/BH-adjusted p-values)")
+
+        # ---- Statistical Significance and Robustness: paper table for FDR
+        #      (tab:fdr_significance) + per-method significance counts ----
+        try:
+            build_significance_table(sv_all, combined, output_folder, method="FDR")
+        except Exception as e:
+            print(f"  [WARN] Significance table generation failed: {e}")
+
+        stab_input = combined.merge(
+            sv_all[[c for c in ["DataSet", "Method", "DR_uplift", "IPW_uplift"] if c in sv_all.columns]],
+            on=["DataSet", "Method"], how="left",
+        )
+        stab_tables = [
+            sv.compute_cross_dataset_stability(stab_input, value_col=col)
+            for col in ["CAU_pp", "RRD_pp", "Recovery_Ratio", "DR_uplift", "IPW_uplift"]
+            if col in stab_input.columns
+        ]
+        stab_tables = [t for t in stab_tables if not t.empty]
+        # if stab_tables:
+        #     stab_path = os.path.join(output_folder, f"{OUTPUT_FOLDER_NAME}_CrossDataset_Stability.csv")
+        #     pd.concat(stab_tables, ignore_index=True).round(4).to_csv(stab_path, index=False)
+        #     print(f"[SAVED] {stab_path}")
+
+    # if all_smd_summary_tables:
+        # smd_path = os.path.join(output_folder, f"{OUTPUT_FOLDER_NAME}_CovariateBalance_SMD_AllDatasets.csv")
+        # pd.concat(all_smd_summary_tables, ignore_index=True).round(4).to_csv(smd_path, index=False)
+        # print(f"[SAVED] {smd_path}")
 
     # ---- Cross-dataset summary: mean + 95% bootstrap CI ACROSS ALL
     #      DATASETS, per method, for CAU_pp / RRD_pp / Recovery_Ratio. This

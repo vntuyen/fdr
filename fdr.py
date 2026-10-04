@@ -2,11 +2,10 @@
 """
 fdr.py
 ======
-FDR: the proposed method. There is only ONE FDR method -- a T-Learner over
-TabPFN (one TabPFN regressor fit per treatment arm, predicting on held-out
-patients with no treatment-column toggling).
+FDR: the proposed method: one TabPFN regressor fit per treatment arm, predicting on held-out
+patients with no treatment-column toggling.
 
-Two SCENARIOS adapt how FDR is *evaluated*, not what FDR *is*:
+Two SCENARIOS adapt how FDR is evaluated:
 
   - "cv"  (recommend_fdr_cv):   used inside repeated k-fold cross-validation.
           Folds are small-ish and repeated many times, so FDR is fit ONCE per
@@ -14,45 +13,17 @@ Two SCENARIOS adapt how FDR is *evaluated*, not what FDR *is*:
           outer n_repeats x k_folds grid; run-to-run variance is already
           captured by the repeated-CV seeds in run_experiments.py.
 
-  - "ood" (recommend_fdr_ood):  used for the fixed train/test OOD split,
-          which is run only once per dataset (no outer repeats). Here FDR
-          additionally:
-            (a) selects the top-K non-treatment features by F-score (the
-                OOD train cohort can have many more candidate columns, and
-                feature selection improves robustness under distribution
-                shift), and
-            (b) averages predictions over a small seed ensemble (since there
-                is no outer repeated-run loop to supply run-to-run variance).
+  - "ood" (recommend_fdr_ood):  used for the fixed train/test OOD split.
 
-Both share the same underlying T-Learner mechanism: train one TabPFN per
+Both share the same underlying  mechanism: train one TabPFN per
 treatment arm on patients who actually received that arm, then predict the
 counterfactual outcome for every test patient under every arm and recommend
 the arm with the lowest predicted outcome (lower RCB = better response).
 
-WHY A T-LEARNER (not a joint model with TP-column toggling)
--------------------------------------------------------------
-A joint model (one TabPFN, treatment columns as input features) must be
-asked, at inference, to flip a patient's TP indicator: e.g. a TP2 patient
-queried with TP2=0, TP1=1. If no training patient ever had that exact
-TP-column pattern, this is an out-of-distribution input for an in-context
-learner like TabPFN, and its attention mechanism has no analogous context
-to retrieve -- producing erratic counterfactual outputs (observed as
-negative recovery uplift on severely imbalanced arms such as multi_ARTemis,
-TP2=45 vs TP3=3).
-
-The T-Learner sidesteps this entirely: each arm's model is trained only on
-patients from that arm and never sees a toggled TP column. At inference it
-predicts the outcome for ALL test patients from their (non-TP) features
-alone. Arms with too few training samples fall back to the training-set
-mean, a safe neutral estimate. No arm balancing is needed or applied for
-FDR -- each arm model only ever sees its own arm's data, so majority-arm
-dominance cannot bias it (unlike the joint linear/NN baselines, which DO
-need balance_training_arms(); see config.py).
 """
 
 import numpy as np
 import pandas as pd
-from tabpfn import TabPFNRegressor
 
 import config
 
@@ -61,11 +32,14 @@ import config
 MIN_ARM_SAMPLES = 5
 
 # ---- OOD-only settings (see module docstring) ----
-OOD_ENSEMBLE_SEEDS = config.REPEAT_SEEDS  # reuse the same 10 seeds as repeated-CV
+OOD_ENSEMBLE_SEEDS = config.REPEAT_SEEDS  # reuse the same 5 seeds as repeated-CV
 OOD_MAX_FEATURES = 40
 
 
-def _make_tabpfn(seed: int = None) -> TabPFNRegressor:
+def _make_tabpfn(seed: int = None):
+    # Imported lazily so that running only the baselines (e.g. --methods CTR)
+    # does not require tabpfn/torch to be importable.
+    from tabpfn import TabPFNRegressor
     return TabPFNRegressor(
         model_path=config.TABPFN_CKPT_PATH,
         device=config.TABPFN_DEVICE,
@@ -87,7 +61,7 @@ def _select_features_for_tabpfn(X_train, y_train, treatment_plans, max_non_tp=OO
 
 
 # ============================================================
-# Scenario 1: CV -- single fit per fold, T-Learner
+# Scenario 1: CV -- single fit per fold
 # ============================================================
 
 def recommend_fdr_cv(X_train, y_train, X_test, treatment_plans):
@@ -118,12 +92,12 @@ def recommend_fdr_cv(X_train, y_train, X_test, treatment_plans):
 
 
 # ============================================================
-# Scenario 2: OOD -- feature-selected, multi-seed ensembled T-Learner
+# Scenario 2: OOD -- feature-selected, multi-seed
 # ============================================================
 
 def recommend_fdr_ood(X_train, y_train, X_test, treatment_plans):
     """
-    FDR for the fixed train/test OOD scenario: same T-Learner mechanism as
+    FDR for the fixed train/test OOD scenario: same mechanism as
     the CV scenario, plus (a) F-score feature selection to improve
     robustness under distribution shift, and (b) averaging over a small
     seed ensemble, since the OOD evaluation runs only once (no outer

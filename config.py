@@ -4,8 +4,9 @@ config.py
 =========
 Single source of truth for:
   - Environment / runtime setup (HF/TabPFN offline flags, CUDA checks, SEED)
-  - Dataset registry: per-dataset treatment plans, outcome column, columns to
-    remove, file layout (CV vs OOD), and naming/plotting metadata
+  - Dataset registry: every dataset's files, protocol (CV / OOD / splits),
+    outcome and its direction, recovery column, treatment plans, columns to
+    remove, and naming/plotting metadata
 
 This module has NO knowledge of any specific method (FDR or baselines) and
 NO knowledge of evaluation/plotting. It only prepares data and describes the
@@ -17,7 +18,19 @@ import os
 import warnings
 import numpy as np
 import pandas as pd
-import torch
+
+# torch is only needed to pick FDR's TabPFN device. It is imported lazily and
+# optionally so that torch-free baselines (e.g. CTR) can run even when torch
+# is missing or broken in the environment.
+try:
+    import torch
+    TORCH_AVAILABLE = True
+    _TORCH_IMPORT_ERROR = None
+except Exception as _torch_err:  # ImportError, or a broken/partial install
+    torch = None
+    TORCH_AVAILABLE = False
+    _TORCH_IMPORT_ERROR = _torch_err
+TORCH_METHODS = {"FDR", "BITES"}
 
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.impute import SimpleImputer
@@ -35,17 +48,24 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 
+# Default: <repo>/tabpfn/ (see README); override with the TABPFN_CKPT_PATH env var.
+TABPFN_CKPT_PATH = os.environ.get(
+    "TABPFN_CKPT_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tabpfn",
+                 "tabpfn-v3-regressor-v3_default.ckpt"),
+)
+
+# Seeds for the repeated runs: every CV dataset is cross-validated once per
+# seed, and every OOD dataset is re-trained and re-evaluated once per seed.
 SEED = 42
+REPEAT_SEEDS = [42, 43, 44, 45, 46]
 
-TABPFN_CKPT_PATH = "/scratch/.../FDR/tabpfn/tabpfn-v3-regressor-v3_default.ckpt"
-
-# Ten seeds shared by the repeated-CV driver and the FDR OOD-ensemble so
-# both pipelines' notion of "a repeat / ensemble member" stays consistent.
-
-REPEAT_SEEDS = [42, 123, 456, 789, 2024, 7, 99, 1337, 31415, 271828]
-
+# FDR's OOD variant averages an ensemble of TabPFN fits in every repeat.
+# Members get seeds derived from the repeat's seed, so repeats differ.
+FDR_OOD_ENSEMBLE_SIZE = 5
 
 def set_seed(seed: int):
+
     """Update the module-level SEED read by every model factory at call time."""
     global SEED
     SEED = seed
@@ -57,10 +77,10 @@ def set_seed(seed: int):
 
 def check_ckpt():
     if not os.path.isfile(TABPFN_CKPT_PATH):
-        raise FileNotFoundError(
-            f"TabPFN checkpoint not found: '{TABPFN_CKPT_PATH}'\n"
-            "Download it to that path before running (no network access allowed)."
-        )
+        # Only FDR needs the checkpoint; warn here and let FDR fail if it runs.
+        print(f"  [WARN] TabPFN checkpoint not found: '{TABPFN_CKPT_PATH}' -- FDR will fail; "
+              "baselines are unaffected.")
+        return
     if not os.access(TABPFN_CKPT_PATH, os.R_OK):
         raise PermissionError(f"TabPFN checkpoint is not readable: '{TABPFN_CKPT_PATH}'")
     size_mb = os.path.getsize(TABPFN_CKPT_PATH) / 1024 / 1024
@@ -68,6 +88,10 @@ def check_ckpt():
 
 
 def check_cuda():
+    if torch is None:
+        print(f"  [WARN] torch could not be imported ({_TORCH_IMPORT_ERROR!r}); "
+              "FDR and BITES will be skipped; all other methods still run.")
+        return "cpu"
     if not torch.cuda.is_available():
         print("  [INFO] No GPU detected, using CPU.")
         return "cpu"
@@ -111,154 +135,233 @@ def load_dataset(path: str, encoding: str = "ISO-8859-1") -> pd.DataFrame:
 
 
 # ============================================================
-# Dataset registry
+# Dataset registry -- EVERY dataset is declared here
 # ============================================================
 #
-# Two SCENARIOS adapt FDR (and all baselines) to different evaluation
-# settings -- these are not different methods, just different ways of
-# splitting train/test for the same datasets:
+# To add a dataset: put its CSV(s) in input/<name>/ and add one entry below
+# (copy the closest existing one). Nothing else needs to change: the
+# lookup tables further down, the runner and the evaluation all read these
+# entries. `python run_experiments.py --list-datasets` shows what is
+# registered.
 #
-#   "cv"  : repeated k-fold cross-validation, train and test drawn from the
-#           same cohort (in-distribution).
-#   "ood" : fixed train/test split where the test cohort is a different
-#           study to the training cohort (out-of-distribution generalisation).
+# Evaluation protocols ("scenario"):
+#   "cv"     : repeated stratified k-fold CV on files["data"], once per seed
+#              in REPEAT_SEEDS (in-distribution).
+#   "ood"    : fixed train/test files (test cohort != train cohort), run once
+#              per seed in REPEAT_SEEDS; the split stays fixed and each repeat
+#              re-trains every method with a different random seed.
+#   "splits" : several predefined train/test pairs, files["train"] /
+#              files["test"] containing "{k}", k = 1..files["n_splits"].
 #
-# `scenario` below records which evaluation protocol each dataset uses.
-#
-# Restricted to the 6 TransNEO/ARTemis-derived datasets (clinical and
-# multi-omics views of the same two cohorts, plus their pooled-CV and OOD
-# variants). Every dataset reported
-# shares a consistent neoadjuvant-therapy setting -- same outcome
-# (RCB.score), same treatment-plan structure (TP1-TP4), and a true
-# same-patient clinical/multi-omics pairing for TransNEO and ARTemis. This
-# keeps every comparison in evaluation.py (CAU/RRD/RR, the paired
-# Clinical-vs-Multi-omics figure, multiplicity correction, etc.)
-# apples-to-apples across datasets.
+# Keys of an entry:
+#   enabled           False = keep the definition but do not run/evaluate it
+#   scenario          "cv" | "ood" | "splits"
+#   files             file names inside input/<input_dir or name>/
+#   outcome_col       outcome the methods model (RCB.score, pCR, ...)
+#   lower_outcome_is_better   True for RCB-like, False for pCR-like outcomes
+#   recovery_col      binary success used by CAU / RRD / Recovery Ratio
+#   treatment_plans   one-hot treatment columns (2 or more)
+#   remove_cols       columns never used as features (ids, other outcomes,
+#                     anything measured after treatment)
+#   id_col            patient id (patient-level bootstrap / permutation)
+#   display_name, title    table row label, figure title
+#   group             datasets sharing outcome + treatments; cross-dataset
+#                     means and multiple-testing correction are per group
+#   cohort, modality  a cohort with one "Clinical" and one "Multi-omics"
+#                     dataset forms a clinical-vs-multi-omics pair
+#   input_dir         input sub-folder if different from the name (optional)
+#   cv_k              CV folds (optional, default 5)
+# Column-selection settings for FDR stay in PREPROCESS_CONFIGS (below).
+
+SCENARIOS = ("cv", "ood", "splits")
+
+# Shared by all TransNEO / ARTemis datasets.
+_NEOADJUVANT_TP = ["TP1", "TP2", "TP3", "TP4"]
+_NEOADJUVANT_COMMON = {
+    "outcome_col": "RCB.score",
+    "lower_outcome_is_better": True,
+    "recovery_col": "resp.pCR",
+    "treatment_plans": _NEOADJUVANT_TP,
+    "id_col": "Trial.ID",
+    "group": "TransNEO_ARTemis",
+}
+_NEOADJUVANT_REMOVE = [
+    "Trial.ID", "resp.Chemosensitive", "resp.Chemoresistant",
+    "resp.pCR", "RCB.category",
+    "Chemo.NumCycles", "Chemo.first.Taxane", "Chemo.first.Anthracycline",
+    "Chemo.second.Taxane", "Chemo.second.Anthracycline",
+    "Chemo.any.Anthracycline", "Chemo.any.antiHER2",
+]
 
 DATASET_REGISTRY = {
     "clin_TransNEO": {
+        **_NEOADJUVANT_COMMON,
+        "enabled": True,
         "scenario": "cv",
-        "treatment_plans": ["TP1", "TP2", "TP3", "TP4"],
-        "outcome_col": "RCB.score",
-        "remove_cols": [
-            "Trial.ID", "resp.Chemosensitive", "resp.Chemoresistant",
-            "resp.pCR", "RCB.category",
-            "Chemo.NumCycles", "Chemo.first.Taxane", "Chemo.first.Anthracycline",
-            "Chemo.second.Taxane", "Chemo.second.Anthracycline",
-            "Chemo.any.Anthracycline", "Chemo.any.antiHER2",
-        ],
+        "files": {"data": "clin_TransNEO.csv"},
+        "remove_cols": list(_NEOADJUVANT_REMOVE),
+        "display_name": "TransNEO clinical",
+        "title": "TransNEO Clinical Dataset",
+        "cohort": "TransNEO", "modality": "Clinical",
     },
     "clin_ARTemis": {
+        **_NEOADJUVANT_COMMON,
+        "enabled": True,
         "scenario": "cv",
-        "treatment_plans": ["TP1", "TP2", "TP3", "TP4"],
-        "outcome_col": "RCB.score",
-        "remove_cols": [
-            "Trial.ID", "resp.Chemosensitive", "resp.Chemoresistant",
-            "resp.pCR", "RCB.category",
-            "Chemo.NumCycles", "Chemo.first.Taxane", "Chemo.first.Anthracycline",
-            "Chemo.second.Taxane", "Chemo.second.Anthracycline",
-            "Chemo.any.Anthracycline", "Chemo.any.antiHER2",
-        ],
+        "files": {"data": "clin_ARTemis.csv"},
+        "remove_cols": list(_NEOADJUVANT_REMOVE),
+        "display_name": "ARTemis clinical",
+        "title": "ARTemis Clinical Dataset",
+        "cohort": "ARTemis", "modality": "Clinical",
     },
     "multi_Trans_ART": {
+        **_NEOADJUVANT_COMMON,
+        "enabled": True,
         "scenario": "cv",
-        "treatment_plans": ["TP1", "TP2", "TP3", "TP4"],
-        "outcome_col": "RCB.score",
-        "remove_cols": [
-            "Trial.ID", "resp.Chemosensitive", "resp.Chemoresistant",
-            "resp.pCR", "RCB.category",
-            "Chemo.NumCycles", "Chemo.first.Taxane", "Chemo.first.Anthracycline",
-            "Chemo.second.Taxane", "Chemo.second.Anthracycline",
-            "Chemo.any.Anthracycline", "Chemo.any.antiHER2",
-        ],
+        "files": {"data": "multi_Trans_ART.csv"},
+        "remove_cols": list(_NEOADJUVANT_REMOVE),
+        "display_name": "Combined TransNEO + ARTemis multi-omics CV",
+        "title": "Multi-omics Datasets CV: TransNEO and ARTemis",
+        "cohort": "TransNEO+ARTemis", "modality": "Multi-omics",
     },
     "multi_TransNEO": {
+        **_NEOADJUVANT_COMMON,
+        "enabled": True,
         "scenario": "cv",
-        "treatment_plans": ["TP1", "TP2", "TP3", "TP4"],
-        "outcome_col": "RCB.score",
-        "remove_cols": [
-            "Trial.ID", "resp.Chemosensitive", "resp.Chemoresistant",
-            "resp.pCR", "RCB.score",
-            "Chemo.NumCycles", "Chemo.first.Taxane", "Chemo.first.Anthracycline",
-            "Chemo.second.Taxane", "Chemo.second.Anthracycline",
-            "Chemo.any.Anthracycline", "Chemo.any.antiHER2",
-        ],
+        "files": {"data": "multi_TransNEO.csv"},
+        "remove_cols": list(_NEOADJUVANT_REMOVE),
+        "display_name": "TransNEO multi-omics",
+        "title": "TransNEO Multi-omics Dataset",
+        "cohort": "TransNEO", "modality": "Multi-omics",
     },
     "multi_ARTemis": {
+        **_NEOADJUVANT_COMMON,
+        "enabled": True,
         "scenario": "cv",
-        "treatment_plans": ["TP1", "TP2", "TP3", "TP4"],
-        "outcome_col": "RCB.score",
-        "remove_cols": [
-            "Trial.ID", "resp.Chemosensitive", "resp.Chemoresistant",
-            "resp.pCR", "RCB.score",
-            "Chemo.NumCycles", "Chemo.first.Taxane", "Chemo.first.Anthracycline",
-            "Chemo.second.Taxane", "Chemo.second.Anthracycline",
-            "Chemo.any.Anthracycline", "Chemo.any.antiHER2",
-        ],
+        "files": {"data": "multi_ARTemis.csv"},
+        "remove_cols": list(_NEOADJUVANT_REMOVE),
+        "display_name": "ARTemis multi-omics",
+        "title": "ARTemis Multi-omics Dataset",
+        "cohort": "ARTemis", "modality": "Multi-omics",
     },
-    # ── OOD scenario: fixed train/test split, test cohort != train cohort ──
+    # ── OOD scenario: fixed train/test split, test cohort != train cohort,
+    #    repeated once per seed in REPEAT_SEEDS ──
     "OOD_multi_Trans_ART": {
+        **_NEOADJUVANT_COMMON,
+        "enabled": True,
         "scenario": "ood",
-        "treatment_plans": ["TP1", "TP2", "TP3", "TP4"],
-        "outcome_col": "RCB.score",
-        "remove_cols": [
-            "Trial.ID", "resp.Chemosensitive", "resp.Chemoresistant", "resp.pCR",
-            "RCB.category",
-            "Chemo.NumCycles", "Chemo.first.Taxane", "Chemo.first.Anthracycline",
-            "Chemo.second.Taxane", "Chemo.second.Anthracycline",
-            "Chemo.any.Anthracycline", "Chemo.any.antiHER2",
-        ],
+        "files": {"train": "OOD_multi_Trans_ART_train.csv",
+                  "test": "OOD_multi_Trans_ART_test.csv"},
+        "remove_cols": list(_NEOADJUVANT_REMOVE),
+        "display_name": "TransNEO and ARTemis multi-omics OOD",
+        "title": "Multi-omics Datasets OOD: TransNEO train, ARTemis test",
+        "cohort": "TransNEO->ARTemis", "modality": "Multi-omics",
     },
-}
 
-CV_DATASETS  = [d for d, c in DATASET_REGISTRY.items() if c["scenario"] == "cv"]
-OOD_DATASETS = [d for d, c in DATASET_REGISTRY.items() if c["scenario"] == "ood"]
-
-DATASET_NAME_MAP = {
-    "clin_TransNEO":       "TransNEO clinical",
-    "clin_ARTemis":        "ARTemis clinical",
-    "multi_TransNEO":      "TransNEO multi-omics",
-    "multi_ARTemis":       "ARTemis multi-omics",
-    "multi_Trans_ART":     "Combined TransNEO + ARTemis multi-omics CV",
-    "OOD_multi_Trans_ART": "TransNEO and ARTemis multi-omics OOD",
-}
-
-DATASET_TITLES = {
-    "clin_ARTemis":        "ARTemis Clinical Dataset",
-    "clin_TransNEO":       "TransNEO Clinical Dataset",
-    "multi_ARTemis":       "ARTemis Multi-omics Dataset",
-    "multi_TransNEO":      "TransNEO Multi-omics Dataset",
-    "multi_Trans_ART":     "Multi-omics Datasets CV: TransNEO and ARTemis",
-    "OOD_multi_Trans_ART": "Multi-omics Datasets OOD: TransNEO train, ARTemis test",
-}
-
-DATASET_ROW_ORDER = list(DATASET_NAME_MAP.values())
-
-
-DATASET_MODALITY = {
-    "clin_TransNEO":  "Clinical",
-    "clin_ARTemis":   "Clinical",
-    "multi_TransNEO": "Multi-omics",
-    "multi_ARTemis":  "Multi-omics",
 }
 
 
-CLINICAL_MULTIOMICS_PAIRS = {
-    "TransNEO": {"clinical": "clin_TransNEO", "multiomics": "multi_TransNEO"},
-    "ARTemis":  {"clinical": "clin_ARTemis",  "multiomics": "multi_ARTemis"},
-}
+def _validate_registry(registry: dict) -> dict:
+    """Check every entry and fill optional keys; returns the ENABLED entries."""
+    required = ["scenario", "files", "outcome_col", "lower_outcome_is_better",
+                "recovery_col", "treatment_plans", "remove_cols"]
+    need_files = {"cv": ["data"], "ood": ["train", "test"], "splits": ["train", "test", "n_splits"]}
+    enabled = {}
+    for name, spec in registry.items():
+        missing = [k for k in required if k not in spec]
+        if missing:
+            raise ValueError(f"DATASET_REGISTRY['{name}'] is missing keys: {missing}")
+        if spec["scenario"] not in SCENARIOS:
+            raise ValueError(f"DATASET_REGISTRY['{name}']: scenario must be one of {SCENARIOS}")
+        miss_f = [k for k in need_files[spec["scenario"]] if k not in spec["files"]]
+        if miss_f:
+            raise ValueError(f"DATASET_REGISTRY['{name}']: scenario '{spec['scenario']}' "
+                             f"needs files {miss_f}")
+        if len(spec["treatment_plans"]) < 2:
+            raise ValueError(f"DATASET_REGISTRY['{name}']: need at least 2 treatment_plans")
+        spec.setdefault("enabled", True)
+        spec.setdefault("display_name", name)
+        spec.setdefault("title", spec["display_name"])
+        spec.setdefault("group", name)
+        spec.setdefault("cohort", None)
+        spec.setdefault("modality", None)
+        spec.setdefault("id_col", None)
+        spec.setdefault("input_dir", name)
+        spec.setdefault("cv_k", 5)
+        spec.setdefault("outcome_label", spec["outcome_col"])
+        if spec["enabled"]:
+            enabled[name] = spec
+    if not enabled:
+        raise ValueError("No enabled datasets in DATASET_REGISTRY.")
+    return enabled
 
 
-MULTIOMICS_DATASETS = [
-    "multi_TransNEO", "multi_ARTemis", "multi_Trans_ART", "OOD_multi_Trans_ART",
+# Everything below uses only the ENABLED datasets.
+ALL_DATASET_DEFINITIONS = DATASET_REGISTRY
+DATASET_REGISTRY = _validate_registry(DATASET_REGISTRY)
+
+
+def dataset_input_dir(data_name: str, base_path: str = None) -> str:
+    base_path = base_path or os.getcwd()
+    return os.path.join(base_path, "input", DATASET_REGISTRY[data_name]["input_dir"])
+
+
+def outcome_sign(data_name: str) -> float:
+    """+1 when a lower outcome is better (RCB), -1 when higher is better (pCR).
+    Every method minimises `outcome_sign * outcome`."""
+    return 1.0 if DATASET_REGISTRY[data_name]["lower_outcome_is_better"] else -1.0
+
+
+def recovery_col(data_name: str) -> str:
+    return DATASET_REGISTRY[data_name]["recovery_col"]
+
+
+def id_col(data_name: str):
+    return DATASET_REGISTRY[data_name].get("id_col")
+
+
+# ---- Lookup tables derived from the registry ----
+
+CV_DATASETS     = [d for d, c in DATASET_REGISTRY.items() if c["scenario"] == "cv"]
+OOD_DATASETS    = [d for d, c in DATASET_REGISTRY.items() if c["scenario"] == "ood"]
+SPLITS_DATASETS = [d for d, c in DATASET_REGISTRY.items() if c["scenario"] == "splits"]
+
+DATASET_NAME_MAP = {d: c["display_name"] for d, c in DATASET_REGISTRY.items()}
+DATASET_TITLES   = {d: c["title"] for d, c in DATASET_REGISTRY.items()}
+DATASET_GROUPS   = {d: c["group"] for d, c in DATASET_REGISTRY.items()}
+
+# Row order of tables and figures (independent of the processing order above).
+DATASET_ROW_ORDER_KEYS = [
+    "clin_TransNEO", "clin_ARTemis", "multi_TransNEO", "multi_ARTemis",
+    "multi_Trans_ART", "OOD_multi_Trans_ART",
 ]
+DATASET_ROW_ORDER = (
+    [DATASET_NAME_MAP[d] for d in DATASET_ROW_ORDER_KEYS if d in DATASET_NAME_MAP]
+    + [DATASET_NAME_MAP[d] for d in DATASET_NAME_MAP if d not in DATASET_ROW_ORDER_KEYS]
+)
+
+# Within-cohort Clinical vs Multi-omics pairs: a cohort with one "Clinical"
+# and one "Multi-omics" dataset forms a pair automatically.
+CLINICAL_MULTIOMICS_PAIRS = {}
+for _d, _c in DATASET_REGISTRY.items():
+    if _c["cohort"] and _c["modality"] in ("Clinical", "Multi-omics"):
+        _key = "clinical" if _c["modality"] == "Clinical" else "multiomics"
+        CLINICAL_MULTIOMICS_PAIRS.setdefault(_c["cohort"], {})[_key] = _d
+CLINICAL_MULTIOMICS_PAIRS = {k: v for k, v in CLINICAL_MULTIOMICS_PAIRS.items()
+                             if set(v) == {"clinical", "multiomics"}}
+
+# Modality is only used for the paired Clinical-vs-Multi-omics comparison.
+DATASET_MODALITY = {d: DATASET_REGISTRY[d]["modality"]
+                    for pair in CLINICAL_MULTIOMICS_PAIRS.values() for d in pair.values()}
+
+MULTIOMICS_DATASETS = [d for d, c in DATASET_REGISTRY.items() if c["modality"] == "Multi-omics"]
 
 
 # ============================================================
 # Method registry metadata (names/colours/grouping for plots & tables)
 # ============================================================
 #
-# 10 methods (FDR + 9 baselines)
+# 11 methods (FDR + 10 baselines)
 
 METHOD_META = {
     "FDR":   ("FDR",           "Proposed"),
@@ -269,6 +372,7 @@ METHOD_META = {
     "DR_L":  ("DR-Learner",    "B. Meta-Learner"),
     "R_L":   ("R-Learner",     "B. Meta-Learner"),
     "CF":    ("Causal Forest", "C. Causal"),
+    "CTR":   ("CTR (Causal Tree)", "C. Causal"),
     "CUTS":  ("CUTS",          "D. Modern SOTA"),
     "BITES": ("BITES",         "D. Modern SOTA"),
 }
@@ -276,7 +380,7 @@ METHOD_META = {
 ALL_METHOD_COL_ORDER = [
     "FDR", "CB", "XGB",
     "S_L", "X_L", "DR_L", "R_L",
-    "CF", "CUTS", "BITES",
+    "CF", "CTR", "CUTS", "BITES",
 ]
 
 MODELS_COLOUR = {
@@ -288,6 +392,7 @@ MODELS_COLOUR = {
     "DR_L":  "tomato",
     "R_L":   "darkorange",
     "CF":    "mediumpurple",
+    "CTR":   "olive",
     "CUTS":  "saddlebrown",
     "BITES": "deeppink",
 }
@@ -369,20 +474,7 @@ def make_cv_splitter(X_full, df, treatment_plans, k, seed):
 # Per-model column selection ("LINEAR_MODELS") + arm balancing
 # ============================================================
 #
-# Scale/distance-sensitive models benefit from dropping redundant/noisy
-# columns; tree-based and meta-learner methods are immune and are excluded.
-# Now that Neural Net, SVR, and Linear Regression have been removed from
-# the baseline set (see config.METHOD_META), FDR is the ONLY method that
-# still needs this column-selection step. Arm balancing (downsampling the
-# majority treatment arm) was only ever needed for those JOINT linear/
-# distance models -- with them removed, BALANCE_MODELS is intentionally
-# empty: FDR uses a T-Learner (one model per arm), which handles imbalance
-# inherently and must NOT be balanced, since balancing would throw away
-# minority-arm signal each arm model needs, and every remaining baseline
-# (CatBoost, XGBoost, the meta-learners, Causal Forest, CUTS, EP-Learner,
-# BITES) either is tree-based/ensemble-based (balancing-insensitive) or
-# already handles arm imbalance internally via its own estimator (e.g.
-# propensity weighting in the meta-learners).
+
 
 LINEAR_MODELS = {"FDR"}    # column selection
 BALANCE_MODELS = set()     # arm balancing -- intentionally empty, see above
