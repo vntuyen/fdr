@@ -1,8 +1,5 @@
 # FDR: Foundation-Model-Based Therapy Recommendation for Neoadjuvant Breast Cancer
 
-[![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/release/python-3100/)
-[![License](https://img.shields.io/badge/license-TBD-lightgrey.svg)](#license)
-
 
 ---
 
@@ -11,11 +8,6 @@
 Selecting the most appropriate neoadjuvant therapy plan for a breast cancer patient is difficult because treatment response varies widely between patients, and the available cohorts are small and high-dimensional.
 
 **FDR** learns one TabPFN foundation-model regressor for each candidate therapy plan. It predicts the continuous Residual Cancer Burden (RCB) score each patient would have under every plan, and recommends the plan with the lowest predicted score.
-
-<p align="center">
-  <!-- TODO: add the method overview figure, e.g. docs/fdr_overview.png -->
-  <!-- <img src="docs/fdr_overview.png" width="720" alt="FDR overview"> -->
-</p>
 
 FDR is compared with ten baselines on six clinical and multi-omics settings built from two independent breast cancer cohorts (TransNEO and ARTemis). The evaluation covers both repeated within-cohort cross-validation and cross-cohort evaluation without retraining.
 
