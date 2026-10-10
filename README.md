@@ -1,5 +1,4 @@
-# FDR: Foundation-Model-Based Therapy Recommendation for Neoadjuvant Breast Cancer
-
+# FDR: Foundation-Model Framework for Personalized Neoadjuvant Treatment Recommendation in Breast Cancer
 
 ---
 
